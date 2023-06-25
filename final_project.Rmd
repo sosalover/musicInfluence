@@ -1,0 +1,256 @@
+---
+title: "Final Project"
+author: "Thomas Moh"
+date: "5/15/2023"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(devtools)
+install_github("vqv/ggbiplot")
+library(ggbiplot)
+library(spotifyr)
+library(tidyverse)
+library(dplyr)
+remotes::install_github('jaburgoyne/compmus')
+library(compmus)
+library(corrplot)
+library(gridExtra)
+Sys.setenv(SPOTIFY_CLIENT_ID = 'a6c987bbbdfc420a902b3825682657df')
+Sys.setenv(SPOTIFY_CLIENT_SECRET = '7b180fbab7c74d2d94802c8deeb5fb24')
+access_token <- get_spotify_access_token()
+```
+
+## R Markdown
+We're eventually going to measure the similarity between each song, measure how influential each song was, and then test if the most influential songs belong to influential artists, test if we can classify a song as influential, and test if artists are significantly more influential than each other, and see if we can classify an artist as influential or not.
+Loading in corpus
+
+```{r cars}
+load("corpus.RData")
+
+```
+
+```{r creating PCA for similarity}
+columns_wanted <- c(9:19, 22, 26)
+label <- corpus[,41]
+pca_data <- corpus[, columns_wanted]
+standardized_pca_data <- pca_data %>% mutate_all(~(scale(.) %>% as.vector))
+pieces.pca <- prcomp(standardized_pca_data, center = TRUE, scale. = TRUE)
+plot(pieces.pca, type = "l", main="Principal Components Analysis")
+print(sum(pieces.pca$sdev[1:8]^2)/sum((pieces.pca$sdev)^2))
+print("81% of the variance is accounted for by the first 8 PC. We will proceed with these PC's")
+relevant_pca_matrix <- pieces.pca$rotation[,1:8]
+total_pc_weights <- rowSums(abs(relevant_pca_matrix))
+print(total_pc_weights)
+```
+
+```{r constructing song similarity matrix}
+
+song_similarity <- matrix(nrow = 1080, ncol = 1080)
+distance_matrix <- dist(as.matrix(pca_data) %*% (relevant_pca_matrix))
+distance_matrix <- as.matrix(distance_matrix)
+
+labeled_distance_matrix <- cbind(distance_matrix, corpus$artist)
+labeled_distance_matrix <- rbind(distance_matrix, corpus$artist)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r creating DEMATEL matrix, echo=FALSE}
+normalized_distance <- scale(distance_matrix)
+I <- diag(nrow(normalized_distance))
+dematel_matrix <- -1*(normalized_distance * t(I-normalized_distance))
+
+```
+
+```{r creating influentiality vectors}
+song_influences <- rowSums(dematel_matrix)
+artist_influences <- tapply(song_influences, rep(1:(length(song_influences)/30), each=30), sum)
+
+song_influences <- cbind(corpus$track_name, song_influences)
+song_influences <- cbind(corpus$artist_name, song_influences)
+song_influences <- cbind(corpus$label, song_influences)
+song_influences <- as.data.frame(song_influences)
+
+artist_influences <- cbind(unique(corpus$artist_name), artist_influences)
+
+artist_influences <- as.data.frame(artist_influences)
+merged <- corpus[match(artist_influences$V1, corpus$artist_name),]
+merged$artist_influences <- artist_influences$artist_influences
+artist_influences <- merged[, c(1,41,42)]
+artist_influences <- as.data.frame(artist_influences)
+
+```
+
+```{r graphing}
+# Create a matrix with labels and song_influences columns
+
+# Subset the matrix for each label
+
+cnn_data <- as.numeric(song_influences[song_influences$V1 == "cnn", "song_influences"])
+thomas_data <- as.numeric(song_influences[song_influences$V1 %in% c("thomas", "both"), "song_influences"])
+random_data <- as.numeric(song_influences[song_influences$V1 %in% c("random", "both"), "song_influences"])
+
+# Create a list of data for each label
+data_list <- list(cnn = cnn_data, author = thomas_data, random = random_data)
+
+# Create the box and whisker plot
+boxplot(data_list, main = "Box and Whisker Plot", xlab = "Labels", ylab = "Song Influences")
+
+```
+```{r statistical t-test for songs}
+sample_sd <- (sd(as.numeric(song_influences$song_influences)))
+sample_mean <- (mean(as.numeric(song_influences$song_influences)))
+song_influences$song_influences <- as.numeric((song_influences$song_influences))
+
+alpha <- 0.05
+sample_size <- 1080
+
+# Calculate critical value for z-test
+z_critical <- qnorm(1 - alpha)
+
+# Calculate critical value for t-test
+t_critical <- qt(1 - alpha, df = sample_size - 1)
+
+# Calculate the standard error
+standard_error <- sample_sd / sqrt(sample_size)
+
+value_t_test <- sample_mean + t_critical * standard_error
+
+print(value_t_test)
+significant_song_influences <- subset(song_influences, as.numeric(song_influences) > value_t_test)
+significant_artist_counts <- table(significant_song_influences$V1)
+predicted_influential_proportion <- significant_artist_counts[1] +significant_artist_counts[3]+significant_artist_counts[4]
+predicted_influential_proportion <- predicted_influential_proportion/(predicted_influential_proportion + significant_artist_counts[2])
+print(predicted_influential_proportion)
+original_proportion <- 480/1080
+
+n_original <- 1080  # Total number of songs in the original dataset
+prop_original <- 480 / n_original  # Proportion of influential songs in the original dataset
+
+n_predicted <- sum(significant_artist_counts)  # Total number of predictions made by the algorithm
+prop_predicted <- predicted_influential_proportion  # Proportion of influential songs predicted by the algorithm
+
+# Perform the one-sample proportion test
+result <- prop.test(x = n_predicted * prop_predicted, n = n_predicted, p = prop_original, alternative = "greater")
+
+# Print the test result
+print(result)
+
+```
+
+From this result we find that the influential information matrix was able to identify statistically significant influential songs at a statistically significant rate (p = 0.003826). 
+That is, songs which were significantly "influential" from the Dematel Matrix were also considered influential by either CNN or me at a significant rate.
+```{r statistical t-test for artists}
+sample_sd <- (sd(as.numeric(artist_influences$artist_influences)))
+sample_mean <- (mean(as.numeric(artist_influences$artist_influences)))
+artist_influences$artist_influences <- as.numeric(artist_influences$artist_influences)
+alpha <- 0.05
+sample_size <- 36
+
+# Calculate critical value for z-test
+z_critical <- qnorm(1 - alpha)
+
+# Calculate critical value for t-test
+t_critical <- qt(1 - alpha, df = sample_size - 1)
+# Calculate the standard error
+standard_error <- sample_sd / sqrt(sample_size)
+artist_value_t_test <- sample_mean + t_critical * standard_error
+
+print(value_t_test)
+significant_artist_influences <- artist_influences[artist_influences$artist_influences > artist_value_t_test, ]
+significant_artist_counts <- table(significant_artist_influences$label)
+print(significant_artist_counts)
+predicted_influential_proportion <- significant_artist_counts[1] +significant_artist_counts[3]+significant_artist_counts[4]
+predicted_influential_proportion <- predicted_influential_proportion/(predicted_influential_proportion + significant_artist_counts[2])
+print(predicted_influential_proportion)
+original_proportion <- 16/36
+
+n_original <- 36  # Total number of songs in the original dataset
+prop_original <- 16 / n_original  # Proportion of influential songs in the original dataset
+
+n_predicted <- sum(significant_artist_counts)  # Total number of predictions made by the algorithm
+prop_predicted <- predicted_influential_proportion  # Proportion of influential songs predicted by the algorithm
+# Perform the one-sample proportion test
+result <- prop.test(x = n_predicted * prop_predicted, n = n_predicted, p = prop_original, alternative = "greater")
+
+# Print the test result
+print(result)
+
+```
+Here there is no significance for the most significantly influential artists being classified as influential "correctly" but we have a very small sample size. The proportion of artists was 0.6363 as opposed to 0.4444 but perhaps due to the small sample size we are not able to infer significance.
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r Plotting separation}
+label_combined <- label
+label_combined[label_combined %in% c("thomas", "cnn", "shared")] <- "influential"
+g <- ggbiplot(pieces.pca, obs.scale = 1, var.scale = 1, groups = label_combined, ellipse = TRUE, circle = TRUE)
+print(g)
+g <- g + scale_color_discrete(name = '')
+g <- g + theme(legend.direction = 'horizontal', 
+               legend.position = 'top') +
+               theme_bw()
+```
+
+```{r echo=FALSE}
+classify_data <- standardized_pca_data
+classify_data$label <- label_combined
+library(caret)
+model_evaluation <- function(method){
+    Train <- createDataPartition(classify_data$label, p=0.8, list=FALSE)
+    training <- classify_data[ Train, ]
+    testing <- classify_data[ -Train, ]
+    mod_fit <- train(label ~ .,  
+                     data=training, method=method)
+    pred <- predict(mod_fit, newdata=testing)
+
+    accuracy <- table(pred, testing[,"label"])
+    sum(diag(accuracy))/sum(accuracy)
+    testing$label <- as.factor(testing$label)
+    confusionMatrix(data=pred, testing$label)
+    
+}
+
+set.seed(1234)
+control <- trainControl(method="repeatedcv", number=10, repeats=3)
+
+# train logistic regression
+modelglm <- train(label ~ ., data=classify_data, method="glm", trControl=control)
+
+# train knn
+modelknn <- train(label ~ ., data=classify_data, method="kknn", trControl=control)
+
+# train nnet
+modelnnet <- train(label ~ ., data=classify_data, method="nnet", trControl=control)
+
+# train the LVQ model
+modelLvq <- train(label ~ ., data=classify_data, method="lvq", trControl=control)
+
+# train the GBM model
+
+modelGbm <- train(label ~ ., data=classify_data, method="gbm", trControl=control)
+
+# train the SVM model
+
+modelSvm <- train(label ~ ., data=classify_data, method="svmRadial", trControl=control)
+
+# train the random forest
+randomforest <- train(label ~ ., data=classify_data, method="rf", trControl=control)
+
+
+```
+```{r assessing machine learning level accuracy}
+results <- resamples(list(LVQ=modelLvq, GBM=modelGbm, SVM=modelSvm,knn=modelknn, nnet=modelnnet, glm=modelglm, rf=randomforest))
+```
+```{r continued}
+bwplot(results)
+model_evaluation("rf")
+```
+```{r which features are important?}
+plot(varImp(randomforest))
+```
